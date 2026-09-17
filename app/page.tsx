@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import type { EarthquakeMapItem } from "./components/earthquake-map";
 
@@ -19,6 +19,8 @@ type ModelEvaluationItem = {
   precision?: number | string;
   recall?: number | string;
   f1_score?: number | string;
+  confusion_matrix?: number[][];
+  confusion_matrix_labels?: string[];
 };
 
 type RiskLevelStats = {
@@ -36,6 +38,13 @@ type RiskDistribution = {
   without_noise?: RiskDistributionScope;
 };
 
+type YearCountItem = {
+  year?: number | string;
+  count?: number;
+  start_date?: string;
+  end_date?: string;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 type NoiseMode = "without-noise" | "with-noise";
 
@@ -47,7 +56,7 @@ const RISK_LEVEL_LABELS: Record<string, string> = {
   LOW: "Low",
 };
 
-const EVALUATION_METRICS: { key: keyof ModelEvaluationItem; label: string }[] = [
+const EVALUATION_METRICS: { key: "accuracy" | "precision" | "recall" | "f1_score"; label: string }[] = [
   { key: "accuracy", label: "Accuracy" },
   { key: "precision", label: "Precision" },
   { key: "recall", label: "Recall" },
@@ -62,6 +71,29 @@ const MODEL_SERIES = [
 const CHART_HEIGHT = 260;
 const NICE_AXIS_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1];
 
+const CONFUSION_THEMES: Record<string, { light: [number, number, number]; dark: [number, number, number] }> = {
+  "Random Forest": { light: [247, 251, 255], dark: [8, 48, 107] },
+  XGBoost: { light: [252, 251, 253], dark: [63, 0, 125] },
+};
+
+function interpolateColor(light: [number, number, number], dark: [number, number, number], t: number) {
+  const clamped = Math.max(0, Math.min(1, t));
+  const channel = (index: number) => Math.round(light[index] + (dark[index] - light[index]) * clamped);
+  return `rgb(${channel(0)}, ${channel(1)}, ${channel(2)})`;
+}
+
+function computeNiceStep(range: number, targetTicks = 5) {
+  if (range <= 0) return 1;
+
+  const roughStep = range / targetTicks;
+  const magnitude = 10 ** Math.floor(Math.log10(roughStep));
+  const residual = roughStep / magnitude;
+
+  const niceResidual = residual > 5 ? 10 : residual > 2 ? 5 : residual > 1 ? 2 : 1;
+
+  return niceResidual * magnitude;
+}
+
 function toNumber(value: number | string | undefined, fallback = 0) {
   if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
   if (typeof value === "string") {
@@ -69,6 +101,13 @@ function toNumber(value: number | string | undefined, fallback = 0) {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
   return fallback;
+}
+
+function formatMonthName(dateValue?: string) {
+  if (!dateValue) return null;
+  const date = new Date(dateValue);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleString("en-US", { month: "long" });
 }
 
 export default function Home() {
@@ -79,6 +118,7 @@ export default function Home() {
   const [riskDistribution, setRiskDistribution] = useState<RiskDistribution | null>(null);
   const [clusterTotalRecords, setClusterTotalRecords] = useState(0);
   const [clusterNoNoiseTotalRecords, setClusterNoNoiseTotalRecords] = useState(0);
+  const [recordsByYear, setRecordsByYear] = useState<YearCountItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -136,6 +176,9 @@ export default function Home() {
           const summaryData = await summaryResponse.json();
           if (summaryData.risk_distribution) {
             setRiskDistribution(summaryData.risk_distribution as RiskDistribution);
+          }
+          if (Array.isArray(summaryData.records_by_year)) {
+            setRecordsByYear(summaryData.records_by_year as YearCountItem[]);
           }
         }
 
@@ -262,9 +305,34 @@ export default function Home() {
               <h3 className="mb-4 text-[18px] font-semibold text-slate-100">Evaluation Models</h3>
               <ModelEvaluationChart modelEvaluations={modelEvaluations} />
 
-              <div className="mt-4 grid grid-cols-2 gap-3 sm:w-80">
-                <SummaryCard label="Average Random Forest" value={summary.randomForestScore.toFixed(4)} />
-                <SummaryCard label="Average XGBoost" value={summary.xgboostScore.toFixed(4)} />
+              <ModelSummaryPanel
+                randomForestScore={summary.randomForestScore}
+                xgboostScore={summary.xgboostScore}
+              />
+            </div>
+
+            <div className="rounded-[18px] border border-slate-700 bg-[#0d2338] p-4">
+              <h3 className="mb-4 text-[18px] font-semibold text-slate-100">
+                Earthquake Record Distribution By Year
+              </h3>
+              <YearDistributionChart data={recordsByYear} />
+            </div>
+
+            <div className="rounded-[18px] border border-slate-700 bg-[#0d2338] p-4">
+              <h3 className="mb-4 text-[18px] font-semibold text-slate-100">Confusion Matrix</h3>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <ConfusionMatrixCard
+                  model={modelEvaluations.find(
+                    (item) => item.model_name?.toLowerCase() === "random forest"
+                  )}
+                  fallbackName="Random Forest"
+                />
+                <ConfusionMatrixCard
+                  model={modelEvaluations.find(
+                    (item) => item.model_name?.toLowerCase() === "xgboost"
+                  )}
+                  fallbackName="XGBoost"
+                />
               </div>
             </div>
           </div>
@@ -426,6 +494,258 @@ function ModelEvaluationChart({ modelEvaluations }: { modelEvaluations: ModelEva
             Evaluation Metrics
           </p>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function ModelSummaryPanel({
+  randomForestScore,
+  xgboostScore,
+}: {
+  randomForestScore: number;
+  xgboostScore: number;
+}) {
+  const optimalModel = randomForestScore >= xgboostScore ? MODEL_SERIES[0] : MODEL_SERIES[1];
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-700 bg-[#101f30] p-4">
+      <div className="flex flex-wrap gap-x-8 gap-y-2">
+        <div className="flex items-center gap-2 text-sm">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: MODEL_SERIES[0].color }} />
+          <span className="text-slate-300">Average {MODEL_SERIES[0].name}</span>
+          <span className="font-mono font-semibold text-slate-100">{randomForestScore.toFixed(4)}</span>
+        </div>
+
+        <div className="flex items-center gap-2 text-sm">
+          <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: MODEL_SERIES[1].color }} />
+          <span className="text-slate-300">Average {MODEL_SERIES[1].name}</span>
+          <span className="font-mono font-semibold text-slate-100">{xgboostScore.toFixed(4)}</span>
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center gap-2 border-t border-slate-700 pt-3 text-sm">
+        <span className="font-semibold uppercase tracking-[0.06em] text-emerald-400">
+          Optimal Model:
+        </span>
+        <span className="font-semibold text-slate-100">{optimalModel.name}</span>
+      </div>
+    </div>
+  );
+}
+
+const YEAR_BAR_COLOR = "#2E86AB";
+
+function YearDistributionChart({ data }: { data: YearCountItem[] }) {
+  const points = data
+    .map((item) => ({
+      year: toNumber(item.year),
+      count: toNumber(item.count),
+      startDate: item.start_date,
+      endDate: item.end_date,
+    }))
+    .filter((item) => Number.isFinite(item.year) && item.year > 0)
+    .sort((a, b) => a.year - b.year);
+
+  if (points.length === 0) {
+    return (
+      <div className="flex h-40 items-center justify-center text-sm text-slate-400">
+        Belum ada data distribusi tahun.
+      </div>
+    );
+  }
+
+  const totalRecords = points.reduce((sum, point) => sum + point.count, 0);
+  const yearRange =
+    points.length > 1 ? `${points[0].year}-${points[points.length - 1].year}` : `${points[0].year}`;
+
+  const maxCount = Math.max(...points.map((point) => point.count));
+  const step = computeNiceStep(maxCount);
+  const yMax = Math.ceil(maxCount / step) * step || step;
+  const tickCount = Math.round(yMax / step) + 1;
+  const yTicks = Array.from({ length: tickCount }, (_, index) => yMax - index * step);
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-slate-100">Earthquake Records After Processed and Clustered</p>
+          <p className="text-xs text-slate-400">Asia Region (USGS Data)</p>
+        </div>
+        <div className="rounded-lg border border-slate-700 bg-[#101f30] px-3 py-2 text-xs text-slate-300">
+          <div>Total Records: {totalRecords.toLocaleString()}</div>
+          <div>Year Range: {yearRange}</div>
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <div className="flex items-center justify-center">
+          <span
+            className="text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400"
+            style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+          >
+            Number of Earthquake Records
+          </span>
+        </div>
+
+        <div
+          className="flex w-14 flex-col justify-between text-right text-[11px] text-slate-400"
+          style={{ height: CHART_HEIGHT }}
+        >
+          {yTicks.map((tick) => (
+            <span key={tick.toString()}>{Math.round(tick).toLocaleString()}</span>
+          ))}
+        </div>
+
+        <div className="flex-1">
+          <div className="relative" style={{ height: CHART_HEIGHT }}>
+            <div className="absolute inset-0 flex flex-col justify-between">
+              {yTicks.map((tick) => (
+                <div key={tick.toString()} className="border-t border-slate-700/50" />
+              ))}
+            </div>
+
+            <div className="relative flex h-full items-end justify-around gap-3 px-2">
+              {points.map((point) => {
+                const heightPct = Math.max(0, Math.min(100, (point.count / yMax) * 100));
+                const startMonth = formatMonthName(point.startDate);
+                const endMonth = formatMonthName(point.endDate);
+                const rangeLabel =
+                  startMonth && endMonth
+                    ? startMonth === endMonth
+                      ? startMonth
+                      : `${startMonth} - ${endMonth}`
+                    : null;
+
+                return (
+                  <div key={point.year} className="flex h-full flex-1 flex-col items-center justify-end">
+                    <span className="mb-1 text-[11px] font-semibold text-slate-200">
+                      {point.count.toLocaleString()}
+                    </span>
+                    <div
+                      className="group relative w-16 max-w-[70%] cursor-default rounded-t-sm transition-[filter] hover:brightness-110"
+                      style={{ height: `${heightPct}%`, backgroundColor: YEAR_BAR_COLOR }}
+                    >
+                      {rangeLabel && (
+                        <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-2 -translate-x-1/2 whitespace-nowrap rounded-md border border-slate-700 bg-[#0b1d2d] px-2 py-1 text-[11px] font-medium text-slate-100 opacity-0 shadow-lg transition-opacity duration-150 group-hover:opacity-100">
+                          {rangeLabel}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="mt-2 flex justify-around px-2 text-xs font-medium text-slate-300">
+            {points.map((point) => (
+              <span key={point.year} className="flex-1 text-center">
+                {point.year}
+              </span>
+            ))}
+          </div>
+
+          <p className="mt-3 text-center text-[11px] font-semibold uppercase tracking-[0.12em] text-slate-400">
+            Year (Data Ingestion Timeline)
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfusionMatrixCard({
+  model,
+  fallbackName,
+}: {
+  model: ModelEvaluationItem | undefined;
+  fallbackName: string;
+}) {
+  const displayName = model?.model_name ?? fallbackName;
+  const theme = CONFUSION_THEMES[displayName] ?? CONFUSION_THEMES["Random Forest"];
+  const labels = model?.confusion_matrix_labels;
+  const matrix = model?.confusion_matrix;
+
+  if (!model || !labels || !matrix || matrix.length === 0) {
+    return (
+      <div className="rounded-xl border border-slate-700 bg-[#101f30] p-4">
+        <p className="mb-3 text-sm font-semibold text-slate-100">{displayName} - Confusion Matrix</p>
+        <div className="flex h-40 items-center justify-center text-sm text-slate-400">
+          Belum ada data confusion matrix.
+        </div>
+      </div>
+    );
+  }
+
+  const maxValue = Math.max(...matrix.flat(), 1);
+
+  return (
+    <div className="rounded-xl border border-slate-700 bg-[#101f30] p-4">
+      <p className="mb-3 text-sm font-semibold text-slate-100">{model.model_name} - Confusion Matrix</p>
+
+      <div className="flex gap-2">
+        <div className="flex items-center justify-center">
+          <span
+            className="text-[11px] font-semibold uppercase tracking-widest text-slate-400"
+            style={{ writingMode: "vertical-rl", transform: "rotate(180deg)" }}
+          >
+            True Label
+          </span>
+        </div>
+
+        <div
+          className="grid flex-1 gap-1"
+          style={{ gridTemplateColumns: `minmax(56px, auto) repeat(${labels.length}, minmax(0, 1fr))` }}
+        >
+          <div />
+          {labels.map((label) => (
+            <div
+              key={`col-${label}`}
+              className="flex items-end justify-center pb-1 text-center text-[10px] font-medium text-slate-300"
+            >
+              {label}
+            </div>
+          ))}
+
+          {matrix.map((row, rowIndex) => (
+            <Fragment key={`row-${labels[rowIndex]}`}>
+              <div className="flex items-center justify-end pr-2 text-[10px] font-medium text-slate-300">
+                {labels[rowIndex]}
+              </div>
+              {row.map((value, colIndex) => {
+                const t = value / maxValue;
+                const bg = interpolateColor(theme.light, theme.dark, t);
+                const textColor = t > 0.5 ? "#f8fafc" : "#1e293b";
+
+                return (
+                  <div
+                    key={`cell-${rowIndex}-${colIndex}`}
+                    className="flex aspect-square items-center justify-center rounded-md text-sm font-semibold"
+                    style={{ backgroundColor: bg, color: textColor }}
+                  >
+                    {value.toLocaleString()}
+                  </div>
+                );
+              })}
+            </Fragment>
+          ))}
+        </div>
+      </div>
+
+      <p className="mt-2 text-center text-[11px] font-semibold uppercase tracking-widest text-slate-400">
+        Predicted Label
+      </p>
+
+      <div className="mt-3 flex items-center gap-2">
+        <span className="text-[10px] text-slate-400">0</span>
+        <div
+          className="h-2 flex-1 rounded-full"
+          style={{
+            background: `linear-gradient(to right, rgb(${theme.light.join(",")}), rgb(${theme.dark.join(",")}))`,
+          }}
+        />
+        <span className="text-[10px] text-slate-400">{maxValue.toLocaleString()}</span>
       </div>
     </div>
   );
