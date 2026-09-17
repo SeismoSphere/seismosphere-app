@@ -220,30 +220,46 @@ export default function Home() {
     const highestEarthquake = orderedPoints[0];
     const lowestEarthquake = orderedPoints[orderedPoints.length - 1];
 
-    const getScore = (modelName: string) => {
-      const evaluation = modelEvaluations.find(
-        (item) => item.model_name?.toLowerCase() === modelName.toLowerCase()
-      );
+    const findEvaluation = (modelName: string) =>
+      modelEvaluations.find((item) => item.model_name?.toLowerCase() === modelName.toLowerCase());
 
-      if (!evaluation) {
-        return 0;
+    // The headline number Airflow's own log reports per model is F1-score
+    // (see classification_operator.py: "Random Forest F1-Score: ..."), so
+    // this mirrors that exactly instead of averaging all four metrics.
+    const getF1 = (modelName: string) => toNumber(findEvaluation(modelName)?.f1_score);
+
+    const randomForestEvaluation = findEvaluation("Random Forest");
+    const xgboostEvaluation = findEvaluation("XGBoost");
+
+    // Optimal model = whichever (model, metric) pair holds the single
+    // highest raw value across all four metrics of both models.
+    let optimalModelName = "Random Forest";
+    let optimalMetricLabel = "F1-Score";
+    let optimalValue = -Infinity;
+
+    for (const [modelName, evaluation] of [
+      ["Random Forest", randomForestEvaluation],
+      ["XGBoost", xgboostEvaluation],
+    ] as const) {
+      for (const metric of EVALUATION_METRICS) {
+        const value = toNumber(evaluation?.[metric.key]);
+        if (value > optimalValue) {
+          optimalValue = value;
+          optimalModelName = modelName;
+          optimalMetricLabel = metric.label;
+        }
       }
-
-      const accuracy = toNumber(evaluation.accuracy);
-      const precision = toNumber(evaluation.precision);
-      const recall = toNumber(evaluation.recall);
-      const f1Score = toNumber(evaluation.f1_score);
-
-      return (accuracy + precision + recall + f1Score) / 4;
-    };
+    }
 
     return {
       lowestMagnitude: toNumber(lowestEarthquake?.magnitude),
       lowestLocation: getLocationLabel(lowestEarthquake),
       highestMagnitude: toNumber(highestEarthquake?.magnitude),
       highestLocation: getLocationLabel(highestEarthquake),
-      randomForestScore: getScore("Random Forest"),
-      xgboostScore: getScore("XGBoost"),
+      randomForestF1: getF1("Random Forest"),
+      xgboostF1: getF1("XGBoost"),
+      optimalModelName,
+      optimalMetricLabel,
     };
   }, [earthquakeSummaryPoints, modelEvaluations]);
 
@@ -306,8 +322,10 @@ export default function Home() {
               <ModelEvaluationChart modelEvaluations={modelEvaluations} />
 
               <ModelSummaryPanel
-                randomForestScore={summary.randomForestScore}
-                xgboostScore={summary.xgboostScore}
+                randomForestF1={summary.randomForestF1}
+                xgboostF1={summary.xgboostF1}
+                optimalModelName={summary.optimalModelName}
+                optimalMetricLabel={summary.optimalMetricLabel}
               />
             </div>
 
@@ -500,27 +518,29 @@ function ModelEvaluationChart({ modelEvaluations }: { modelEvaluations: ModelEva
 }
 
 function ModelSummaryPanel({
-  randomForestScore,
-  xgboostScore,
+  randomForestF1,
+  xgboostF1,
+  optimalModelName,
+  optimalMetricLabel,
 }: {
-  randomForestScore: number;
-  xgboostScore: number;
+  randomForestF1: number;
+  xgboostF1: number;
+  optimalModelName: string;
+  optimalMetricLabel: string;
 }) {
-  const optimalModel = randomForestScore >= xgboostScore ? MODEL_SERIES[0] : MODEL_SERIES[1];
-
   return (
     <div className="mt-4 rounded-xl border border-slate-700 bg-[#101f30] p-4">
       <div className="flex flex-wrap gap-x-8 gap-y-2">
         <div className="flex items-center gap-2 text-sm">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: MODEL_SERIES[0].color }} />
           <span className="text-slate-300">Average {MODEL_SERIES[0].name}</span>
-          <span className="font-mono font-semibold text-slate-100">{randomForestScore.toFixed(4)}</span>
+          <span className="font-mono font-semibold text-slate-100">{randomForestF1.toFixed(4)}</span>
         </div>
 
         <div className="flex items-center gap-2 text-sm">
           <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: MODEL_SERIES[1].color }} />
           <span className="text-slate-300">Average {MODEL_SERIES[1].name}</span>
-          <span className="font-mono font-semibold text-slate-100">{xgboostScore.toFixed(4)}</span>
+          <span className="font-mono font-semibold text-slate-100">{xgboostF1.toFixed(4)}</span>
         </div>
       </div>
 
@@ -528,7 +548,8 @@ function ModelSummaryPanel({
         <span className="font-semibold uppercase tracking-[0.06em] text-emerald-400">
           Optimal Model:
         </span>
-        <span className="font-semibold text-slate-100">{optimalModel.name}</span>
+        <span className="font-semibold text-slate-100">{optimalModelName}</span>
+        <span className="text-xs text-slate-400">(by {optimalMetricLabel})</span>
       </div>
     </div>
   );
