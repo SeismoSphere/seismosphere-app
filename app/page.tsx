@@ -45,6 +45,14 @@ type YearCountItem = {
   end_date?: string;
 };
 
+type ClusteringQuality = {
+  algorithm?: string;
+  dbcv_score?: number;
+  n_clusters?: number;
+  n_noise?: number;
+  total_records?: number;
+};
+
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 type NoiseMode = "without-noise" | "with-noise";
 
@@ -70,6 +78,21 @@ const MODEL_SERIES = [
 
 const CHART_HEIGHT = 260;
 const NICE_AXIS_STEPS = [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1];
+
+// Rule-of-thumb DBCV quality bands (not an official standard — DBCV has no
+// universally fixed cutoffs, these just give a reader an intuitive sense of
+// where a score lands on the -1..1 scale).
+const DBCV_TIERS = [
+  { max: 0, label: "Poor", color: "#f43f5e" },
+  { max: 0.2, label: "Weak", color: "#f97316" },
+  { max: 0.4, label: "Moderate", color: "#eab308" },
+  { max: 0.6, label: "Good", color: "#22c55e" },
+  { max: Infinity, label: "Excellent", color: "#10b981" },
+];
+
+function getDbcvTier(score: number) {
+  return DBCV_TIERS.find((tier) => score < tier.max) ?? DBCV_TIERS[DBCV_TIERS.length - 1];
+}
 
 const CONFUSION_THEMES: Record<string, { light: [number, number, number]; dark: [number, number, number] }> = {
   "Random Forest": { light: [247, 251, 255], dark: [8, 48, 107] },
@@ -119,6 +142,7 @@ export default function Home() {
   const [clusterTotalRecords, setClusterTotalRecords] = useState(0);
   const [clusterNoNoiseTotalRecords, setClusterNoNoiseTotalRecords] = useState(0);
   const [recordsByYear, setRecordsByYear] = useState<YearCountItem[]>([]);
+  const [clusteringQuality, setClusteringQuality] = useState<ClusteringQuality | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -179,6 +203,9 @@ export default function Home() {
           }
           if (Array.isArray(summaryData.records_by_year)) {
             setRecordsByYear(summaryData.records_by_year as YearCountItem[]);
+          }
+          if (summaryData.clustering_quality) {
+            setClusteringQuality(summaryData.clustering_quality as ClusteringQuality);
           }
         }
 
@@ -327,6 +354,8 @@ export default function Home() {
                 optimalModelName={summary.optimalModelName}
                 optimalMetricLabel={summary.optimalMetricLabel}
               />
+
+              <ClusteringQualityTile quality={clusteringQuality} />
             </div>
 
             <div className="rounded-[18px] border border-slate-700 bg-[#0d2338] p-4">
@@ -551,6 +580,66 @@ function ModelSummaryPanel({
         <span className="font-semibold text-slate-100">{optimalModelName}</span>
         <span className="text-xs text-slate-400">(by {optimalMetricLabel})</span>
       </div>
+    </div>
+  );
+}
+
+function ClusteringQualityTile({ quality }: { quality: ClusteringQuality | null }) {
+  const score = quality?.dbcv_score;
+
+  if (typeof score !== "number") {
+    return (
+      <div className="mt-4 rounded-xl border border-slate-700 bg-[#101f30] p-4">
+        <p className="text-sm font-semibold text-slate-100">Clustering Quality (DBCV)</p>
+        <div className="mt-3 flex h-16 items-center justify-center text-sm text-slate-400">
+          Belum ada data kualitas clustering.
+        </div>
+      </div>
+    );
+  }
+
+  const tier = getDbcvTier(score);
+  const totalRecords = quality?.total_records ?? 0;
+  const nNoise = quality?.n_noise ?? 0;
+  const noisePct = totalRecords > 0 ? (nNoise / totalRecords) * 100 : 0;
+  const fillPct = Math.max(0, Math.min(100, ((score + 1) / 2) * 100));
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-700 bg-[#101f30] p-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm font-semibold text-slate-100">Clustering Quality (DBCV)</p>
+        <span
+          className="rounded-full px-2.5 py-0.5 text-xs font-semibold"
+          style={{ backgroundColor: `${tier.color}26`, color: tier.color }}
+        >
+          {tier.label}
+        </span>
+      </div>
+
+      <div className="mt-2 flex items-baseline gap-2">
+        <span className="font-mono text-2xl font-bold text-slate-100">{score.toFixed(4)}</span>
+        <span className="text-xs text-slate-400">range -1 to 1, higher is better</span>
+      </div>
+
+      <div className="mt-3">
+        <div className="relative h-2 rounded-full bg-slate-700">
+          <div
+            className="absolute inset-y-0 left-0 rounded-full"
+            style={{ width: `${fillPct}%`, backgroundColor: tier.color }}
+          />
+          <div className="absolute inset-y-0 left-1/2 w-px bg-slate-500" />
+        </div>
+        <div className="mt-1 flex justify-between text-[10px] text-slate-500">
+          <span>-1</span>
+          <span>0</span>
+          <span>+1</span>
+        </div>
+      </div>
+
+      <p className="mt-2 text-xs text-slate-400">
+        {quality?.n_clusters ?? 0} clusters · {nNoise.toLocaleString()} noise points ({noisePct.toFixed(1)}%) dari{" "}
+        {totalRecords.toLocaleString()} titik
+      </p>
     </div>
   );
 }
